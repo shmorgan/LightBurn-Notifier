@@ -31,10 +31,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PAGES = {"/": "index.html", "/config": "config.html"}
 HISTORY_FILE = os.environ.get("LIGHTBURN_HISTORY_FILE", "/var/lib/lightburn-status/history.jsonl")
 HISTORY_MAX = 500    # events kept
-ENDPOINTS = {"/api/status": "/api/status", "/api/poll": "/api/events/poll",
-             "/api/project": "/api/project"}
-WATCH_INTERVAL = 2   # seconds between checks
-DOWN_AFTER = 3       # consecutive failed checks before "unreachable" alert
+ENDPOINTS = {"/api/status": "/api/status", "/api/project": "/api/project",
+             "/api/goto/saved": "/api/goto/saved"}
+WATCH_INTERVAL = 1   # seconds between checks
+DOWN_AFTER = 5       # consecutive failed checks before "unreachable" alert
+SNAPSHOT_MAX_AGE = 3 # seconds a cached snapshot may be served to the page
 PUSHOVER = "https://api.pushover.net/1/"
 
 
@@ -228,6 +229,16 @@ def project_filename():
     return data.get("filename") or None if code == 200 else None
 
 
+snapshot = {"t": 0, "code": 0, "data": {}}   # latest /api/events/poll result
+
+
+def live_snapshot():
+    """Latest LightBurn poll data for the page: the watcher's cache, or a live fetch."""
+    if time.time() - snapshot["t"] <= SNAPSHOT_MAX_AGE:
+        return snapshot["code"], dict(snapshot["data"])
+    return fetch("/api/events/poll")
+
+
 def watch():
     """Background loop: record history, alert on job-state changes and on outages."""
     last = None        # last confirmed job state (None = needs a fresh baseline)
@@ -246,6 +257,7 @@ def watch():
             job_start = job_file = None
         now = time.time()
         code, data = fetch("/api/events/poll")
+        snapshot.update(t=time.time(), code=code, data=data)
         if code == 200:
             if down:
                 record({"type": "outage", "to": "reachable", "t": now,
@@ -318,7 +330,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
-        if path in ENDPOINTS:
+        if path == "/api/poll":
+            code, data = live_snapshot()
+            data["checked_at"] = int(time.time())
+            self._json(code, data)
+        elif path in ENDPOINTS:
             code, data = fetch(ENDPOINTS[path])
             data["checked_at"] = int(time.time())
             self._json(code, data)

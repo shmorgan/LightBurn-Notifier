@@ -1,10 +1,10 @@
 # LightBurn Notifier
 
-**Version 1.2.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.3.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
-- A **status page** (`/lightburn/`) showing whether LightBurn is reachable, the selected machine, whether the machine is connected, the job state (idle / running / paused), job progress, and machine and workpiece position. It refreshes every 5 seconds.
+- A **status page** (`/lightburn/`) showing whether LightBurn is reachable, the selected machine, whether the machine is connected, the job state (idle / running / paused), job progress, machine and workpiece position, the speed and power overrides, spindle / coolant / vacuum state, jog settings, and your saved positions. It refreshes every second.
 - **Pushover alerts** to your phone when a job starts, pauses, resumes, finishes or stops, and when LightBurn becomes unreachable or comes back. Alerts are sent by a background watcher, so they work even if nobody has the page open.
 - A **history** table on the status page: job started / paused / resumed / finished (with total job time), machine connected / disconnected, and LightBurn unreachable / reachable again, with timestamps. The last 500 events are kept across restarts.
 - Optionally, the **project filename** of the job (see [Showing the project filename](#showing-the-project-filename)).
@@ -42,7 +42,7 @@ LightBurn's REST API requires a Bearer token that **changes every minute**: `hex
 
 1. It holds the secret and signs every request to LightBurn.
 2. It serves the status page and a small JSON API to the browser. The browser never talks to LightBurn directly.
-3. It runs a **watcher thread** that checks LightBurn every 2 seconds and sends Pushover alerts.
+3. It runs a **watcher thread** that checks LightBurn once a second, keeps the latest reading for the status page (so any number of open browsers puts no extra load on LightBurn), and sends Pushover alerts.
 
 nginx simply proxies `/lightburn/` to the service, which listens on `127.0.0.1:8095` only (it is not reachable from the network except through nginx).
 
@@ -53,8 +53,8 @@ LightBurn only allows pairing (`POST /api/connect`) **from the LightBurn compute
 ### How the watcher decides to alert
 
 - The first successful check after the service starts sets the baseline. Restarting the service never sends an alert.
-- A job state change (for example `idle` to `running`) must be seen on **two consecutive checks** (about 2 to 4 seconds) before an alert is sent. This avoids alerts from a single odd reading.
-- If LightBurn fails **3 checks in a row** (unreachable, connection refused, token rejected), an "UNREACHABLE" alert is sent once. When it answers again, a "reachable again" alert is sent and the job state is re-baselined so you do not get a false "job started".
+- A job state change (for example `idle` to `running`) must be seen on **two consecutive checks** (about 1 to 2 seconds) before an alert is sent. This avoids alerts from a single odd reading.
+- If LightBurn fails **5 checks in a row** (unreachable, connection refused, token rejected), an "UNREACHABLE" alert is sent once. When it answers again, a "reachable again" alert is sent and the job state is re-baselined so you do not get a false "job started".
 - Having no secret file yet is not treated as an outage.
 
 ### History
@@ -195,7 +195,7 @@ The trailing slashes matter. If you do not use nginx, any reverse proxy that map
 
 ### 6. Check it
 
-Open `http://YOUR-SERVER/lightburn/`. Within 5 seconds the page should say **LightBurn is running** and show your machine name. If not, see [Troubleshooting](#troubleshooting).
+Open `http://YOUR-SERVER/lightburn/`. Within a couple of seconds the page should say **LightBurn is running** and show your machine name. If not, see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -224,7 +224,7 @@ sudo sh -c 'printf "APP_TOKEN=YOUR_APP_TOKEN\nUSER_KEY=YOUR_USER_KEY\n" > /etc/l
 | Job resumes | `LightBurn: Job resumed` | state goes `paused` to `running` |
 | Job pauses | `LightBurn: Job paused` | state goes to `paused` |
 | Job ends | `LightBurn: Job finished or stopped` | state goes from `running` or `paused` to `idle` (message includes total time, and the filename if available) |
-| Outage | `LightBurn: UNREACHABLE` | 3 consecutive failed checks |
+| Outage | `LightBurn: UNREACHABLE` | 5 consecutive failed checks |
 | Recovery | `LightBurn: reachable again` | first success after an outage |
 
 LightBurn does not report whether a job completed or was cancelled, so "finished or stopped" covers both.
@@ -241,10 +241,10 @@ LightBurn does not report whether a job completed or was cancelled, so "finished
 | Pushover keys file | `LIGHTBURN_PUSHOVER_FILE` env var | `/etc/lightburn/pushover` |
 | History file | `LIGHTBURN_HISTORY_FILE` env var | `/var/lib/lightburn-status/history.jsonl` |
 | Events kept | `HISTORY_MAX` in `lightburn_status.py` | 500 |
-| Check interval | `WATCH_INTERVAL` in `lightburn_status.py` | 2 seconds |
-| Failed checks before outage alert | `DOWN_AFTER` in `lightburn_status.py` | 3 |
+| Check interval | `WATCH_INTERVAL` in `lightburn_status.py` | 1 second |
+| Failed checks before outage alert | `DOWN_AFTER` in `lightburn_status.py` | 5 |
 | Listening address and port | last line of `lightburn_status.py` | `127.0.0.1:8095` |
-| Page refresh | `setInterval(refresh, 5000)` in `index.html` | 5 seconds |
+| Page refresh | the `loop()` timer at the end of `index.html` | 1 second (history every 5 seconds) |
 
 After changing the service file or the Python script: `sudo systemctl daemon-reload && sudo systemctl restart lightburn-status`.
 
@@ -255,7 +255,8 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 | `GET /` | status page |
 | `GET /config` | Pushover configuration page |
 | `GET /api/status` | LightBurn `/api/status` (device name, connected, capabilities) |
-| `GET /api/poll` | LightBurn `/api/events/poll` (job, position, overrides, aux, settings) |
+| `GET /api/poll` | latest LightBurn `/api/events/poll` snapshot (job, position, overrides, aux, settings, connection), cached by the watcher |
+| `GET /api/goto/saved` | LightBurn saved positions |
 | `GET /api/project` | LightBurn `/api/project` (only works if paired with `project`) |
 | `GET /api/history` | newest 100 history events, newest first |
 | `GET /api/config` | Pushover configured or not, and the LightBurn host and port being monitored (never returns the keys) |

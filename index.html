@@ -50,14 +50,21 @@
       <dt>Progress</dt><dd><div class="bar"><div id="fill"></div></div><span id="pct">–</span></dd>
       <dt>Machine position</dt><dd id="mpos">–</dd>
       <dt>Workpiece position</dt><dd id="wpos">–</dd>
+      <dt>Speed / power override</dt><dd id="ovr">–</dd>
+      <dt>Spindle · coolant · vacuum</dt><dd id="aux">–</dd>
+      <dt>Jog step · speed</dt><dd id="jog">–</dd>
       <dt>Z axis / overrides</dt><dd id="caps">–</dd>
     </dl>
+    <details id="savedbox" hidden>
+      <summary>Saved positions</summary>
+      <table id="saved"></table>
+    </details>
   </div>
   <h2>History</h2>
   <div class="card" style="padding:8px 20px">
     <table id="hist"><tbody><tr><td class="muted">Loading…</td></tr></tbody></table>
   </div>
-  <footer>Last checked: <span id="when">never</span> · refreshes every 5 s · <a href="config" style="color:inherit">Settings</a></footer>
+  <footer>Last checked: <span id="when">never</span> · refreshes every second · <a href="config" style="color:inherit">Settings</a></footer>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -67,30 +74,27 @@ function set(cls, headline) { $('state').className = 'state ' + cls; $('headline
 
 async function refresh() {
   try {
-    const [s, p] = await Promise.all([
-      fetch('api/status', {cache:'no-store'}),
-      fetch('api/poll', {cache:'no-store'}),
-    ]);
-    const st = await s.json();
-    if (!s.ok) throw new Error(st.error || ('HTTP ' + s.status));
+    const r = await fetch('api/poll', {cache:'no-store'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    const st = d.connection || {}, j = d.job || {}, o = d.overrides, a = d.aux, s = d.settings;
     $('err').hidden = true;
     set('ok', 'LightBurn is running');
     $('prog').textContent = 'Running, API reachable';
     $('dev').textContent = st.device_name || '–';
     $('conn').textContent = yn(st.connected);
     $('caps').textContent = yn(st.supports_z) + ' / ' + yn(st.supports_overrides);
-    if (p.ok) {
-      const d = await p.json(), j = d.job || {};
-      $('job').textContent = j.state || 'unknown';
-      const pr = j.progress;
-      $('fill').style.width = (pr != null ? Math.min(100, Math.max(0, pr)) : 0) + '%';
-      $('pct').textContent = pr != null ? pr.toFixed(1) + '%' : (j.state === 'idle' ? 'No job running' : 'Not reported');
-      $('mpos').textContent = fmt(d.position && d.position.machine);
-      $('wpos').textContent = fmt(d.position && d.position.workpiece);
-    } else {
-      for (const id of ['job','pct','mpos','wpos']) $(id).textContent = '–';
-      $('fill').style.width = '0';
-    }
+    $('job').textContent = j.state || 'unknown';
+    const pr = j.progress;
+    $('fill').style.width = (pr != null ? Math.min(100, Math.max(0, pr)) : 0) + '%';
+    $('pct').textContent = pr != null ? pr.toFixed(1) + '%' : (j.state === 'idle' ? 'No job running' : 'Not reported');
+    $('mpos').textContent = fmt(d.position && d.position.machine);
+    $('wpos').textContent = fmt(d.position && d.position.workpiece);
+    $('ovr').textContent = o ? 'Speed ' + o.speed_percent + '% · Power ' + o.power_percent + '%' : '–';
+    const onoff = v => v ? 'on' : 'off';
+    $('aux').textContent = a ? 'Spindle ' + onoff(a.spindle_on) + (a.spindle_rpm ? ' (' + a.spindle_rpm + ' rpm)' : '')
+      + ' · Coolant ' + onoff(a.coolant_on) + ' · Vacuum ' + onoff(a.vacuum_on) : '–';
+    $('jog').textContent = s ? s.xy_distance + ' ' + (s.distance_units || 'mm') + ' · ' + s.xy_speed + ' ' + (s.units || '') : '–';
     $('when').textContent = new Date().toLocaleTimeString();
   } catch (e) {
     set('bad', 'LightBurn not reachable');
@@ -137,8 +141,29 @@ async function projectFile() {   // only available if paired with the 'project' 
     $('file').textContent = f || ''; $('file').hidden = $('filedt').hidden = !f;
   } catch (e) { $('file').hidden = $('filedt').hidden = true; }
 }
-const tick = () => { refresh(); history(); projectFile(); };
-tick(); setInterval(tick, 5000);
+async function savedPositions() {
+  try {
+    const r = await fetch('api/goto/saved', {cache:'no-store'});
+    const list = r.ok ? (await r.json()).positions || [] : [];
+    const tb = document.createElement('tbody');
+    for (const p of list) {
+      const tr = tb.insertRow(), c1 = tr.insertCell(), c2 = tr.insertCell();
+      c1.textContent = p.name || ('Position ' + p.index);
+      c2.textContent = 'X ' + p.x + '  Y ' + p.y + (p.include_z ? '  Z ' + p.z : '') + (p.workpiece ? ' (workpiece)' : ' (machine)');
+      c2.className = 'muted';
+    }
+    $('saved').replaceChildren(tb);
+    $('savedbox').hidden = !list.length;
+  } catch (e) { $('savedbox').hidden = true; }
+}
+let n = 0;
+(function loop() {
+  refresh();
+  if (n % 5 === 0) history();
+  if (n % 15 === 0) projectFile();
+  if (n % 30 === 0) savedPositions();
+  n++; setTimeout(loop, 1000);
+})();
 </script>
 </body>
 </html>
