@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LightBurn Alerts</title>
+<title>LightBurn Settings</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#6b7385; --ok:#1a8f4c; --bad:#c9342b; --line:#e3e6ec; --accent:#2f6fed; }
   @media (prefers-color-scheme: dark) {
@@ -20,12 +20,26 @@
   button.alt { background:transparent; color:var(--accent); border:1px solid var(--accent); }
   .hint, footer a { color:var(--muted); font-size:.9rem; }
   #msg { margin-top:14px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
-  #cur { font-weight:600; }
+  #cur, #curhost { font-weight:600; }
+  h2 { font-size:1.1rem; margin:24px 0 10px; }
+  code { background:var(--bg); padding:1px 5px; border-radius:4px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Pushover Alerts</h1>
+  <h1>Settings</h1>
+  <h2>LightBurn computer</h2>
+  <div class="card">
+    <p>Currently monitoring: <span id="curhost">checking…</span></p>
+    <form id="hf" autocomplete="off">
+      <label for="host">IP address or hostname (add <code>:port</code> if not 19520)</label>
+      <input id="host" type="text" required placeholder="192.168.1.50" autocomplete="off" spellcheck="false">
+      <div class="row"><button type="submit">Save</button></div>
+    </form>
+    <p class="hint">Changes take effect immediately. Only local network addresses are accepted. If this is a different computer than before, run <code>pair.ps1</code> on it and save the new secret (see the README), because the pairing secret belongs to one LightBurn installation.</p>
+    <div id="hmsg" role="status"></div>
+  </div>
+  <h2>Pushover alerts</h2>
   <div class="card">
     <p>Status: <span id="cur">checking…</span></p>
     <p class="hint">Alerts are sent when the job state changes (started, paused, resumed, finished) and when LightBurn becomes unreachable or comes back. Saved keys are never shown again; enter new ones to replace them.</p>
@@ -48,9 +62,20 @@ const $ = id => document.getElementById(id);
 function say(text, ok) { $('msg').textContent = text; $('msg').className = ok ? 'ok' : 'bad'; }
 async function status() {
   try { const c = await (await fetch('api/config', {cache:'no-store'})).json();
-        $('cur').textContent = c.configured ? 'Configured' : 'Not configured'; }
-  catch { $('cur').textContent = 'Unknown'; }
+        $('cur').textContent = c.configured ? 'Configured' : 'Not configured';
+        $('curhost').textContent = c.host + ':' + c.port + ' (' + c.host_source + ')';
+        if (!$('host').value) $('host').value = c.port === 19520 ? c.host : c.host + ':' + c.port; }
+  catch { $('cur').textContent = $('curhost').textContent = 'Unknown'; }
 }
+function hsay(text, cls) { $('hmsg').textContent = text; $('hmsg').className = cls; }
+$('hf').addEventListener('submit', async e => {
+  e.preventDefault(); hsay('Saving…', 'ok');
+  const [ok, d] = await post('api/config/host', {host: $('host').value});
+  if (!ok) hsay(d.error || 'Save failed', 'bad');
+  else if (d.reachable) hsay('Saved. LightBurn answered at ' + d.host + ':' + d.port + '.', 'ok');
+  else hsay('Saved, but nothing answered at ' + d.host + ':' + d.port + '. Check that LightBurn is running with network API access enabled and that port ' + d.port + ' is open.', 'bad');
+  $('host').value = ''; status();
+});
 async function post(path, body) {
   const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {})});
   return [r.ok, await r.json().catch(() => ({}))];

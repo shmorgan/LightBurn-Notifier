@@ -19,10 +19,12 @@ PARTICULAR PURPOSE. See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import hashlib, hmac, json, os, threading, time, urllib.parse, urllib.request, urllib.error
+import hashlib, hmac, ipaddress, json, os, re, socket, threading, time
+import urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LIGHTBURN = os.environ.get("LIGHTBURN_URL", "http://127.0.0.1:19520")
+HOST_FILE = os.environ.get("LIGHTBURN_HOST_FILE", "/etc/lightburn/host")
 SECRET_FILE = os.environ.get("LIGHTBURN_SECRET_FILE", "/etc/lightburn/secret")
 PUSHOVER_FILE = os.environ.get("LIGHTBURN_PUSHOVER_FILE", "/etc/lightburn/pushover")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,10 +45,69 @@ def token():
     return hmac.new(secret.encode(), minute.encode(), hashlib.sha256).hexdigest()
 
 
+config_gen = 0   # bumped whenever the LightBurn address changes (watcher re-baselines)
+
+
+def load_host():
+    """(host, port) saved from the config page, or None."""
+    try:
+        cfg = dict(l.strip().split("=", 1) for l in open(HOST_FILE) if "=" in l)
+        return cfg["HOST"], int(cfg.get("PORT", 19520))
+    except Exception:
+        return None
+
+
+def lightburn_url():
+    saved = load_host()
+    return f"http://{saved[0]}:{saved[1]}" if saved else LIGHTBURN
+
+
+def parse_host(text):
+    """Validate 'host' or 'host:port'. Returns (host, port) or raises ValueError.
+
+    Only private/loopback/link-local addresses are accepted, so this page cannot be
+    used to point the service (and its API tokens) at a machine on the internet.
+    """
+    m = re.fullmatch(r"([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?", text.strip())
+    if not m:
+        raise ValueError("Enter an IP address or hostname, optionally followed by :port.")
+    host, port = m.group(1), int(m.group(3) or 19520)
+    if not 1 <= port <= 65535:
+        raise ValueError("Port must be between 1 and 65535.")
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise ValueError(f"Cannot resolve '{host}'.")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not (ip.is_private or ip.is_loopback or ip.is_link_local):
+            raise ValueError("Only local network addresses are allowed.")
+    return host, port
+
+
+def save_host(host, port):
+    global config_gen
+    tmp = HOST_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(f"HOST={host}\nPORT={port}\n")
+    os.replace(tmp, HOST_FILE)
+    config_gen += 1
+
+
+def host_reachable(host, port):
+    try:
+        urllib.request.urlopen(f"http://{host}:{port}/", timeout=4).read(1)
+        return True
+    except urllib.error.HTTPError:
+        return True      # it answered
+    except Exception:
+        return False
+
+
 def fetch(path):
     """Return (http_status, dict) from LightBurn; never raises."""
     try:
-        req = urllib.request.Request(LIGHTBURN + path,
+        req = urllib.request.Request(lightburn_url() + path,
                                      headers={"Authorization": "Bearer " + token()})
         with urllib.request.urlopen(req, timeout=5) as r:
             return 200, json.loads(r.read())
@@ -176,7 +237,13 @@ def watch():
     down = False
     machine = None     # last seen "machine connected" flag
     job_start = job_file = None
+    seen_gen = config_gen
     while True:
+        if seen_gen != config_gen:      # LightBurn address changed: start fresh
+            seen_gen = config_gen
+            last = pending = machine = None
+            fails = 0
+            job_start = job_file = None
         now = time.time()
         code, data = fetch("/api/events/poll")
         if code == 200:
@@ -259,7 +326,14 @@ class Handler(BaseHTTPRequestHandler):
             with history_lock:
                 self._json(200, {"events": history[::-1][:100]})
         elif path == "/api/config":      # never returns the stored keys
-            self._json(200, {"configured": load_pushover() is not None})
+            saved = load_host()
+            if saved:
+                host, port = saved
+            else:
+                host, port = urllib.parse.urlparse(LIGHTBURN).netloc.rsplit(":", 1)
+            self._json(200, {"configured": load_pushover() is not None,
+                             "host": host, "port": int(port),
+                             "host_source": "config page" if saved else "service default"})
         elif path in PAGES:
             with open(os.path.join(HERE, PAGES[path]), "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
@@ -286,6 +360,16 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 return self._json(500, {"error": f"could not save: {e}"})
             self._json(200, {"ok": True})
+        elif path == "/api/config/host":
+            try:
+                host, port = parse_host(str(body.get("host", "")))
+                save_host(host, port)
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            except OSError as e:
+                return self._json(500, {"error": f"could not save: {e}"})
+            self._json(200, {"ok": True, "host": host, "port": port,
+                             "reachable": host_reachable(host, port)})
         elif path == "/api/config/test":
             ok, err = pushover("LightBurn test", "Pushover alerts are working.")
             self._json(200 if ok else 400, {"ok": ok, "error": err})

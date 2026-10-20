@@ -1,6 +1,6 @@
 # LightBurn Notifier
 
-**Version 1.1.1** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.2.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
@@ -8,7 +8,7 @@ It gives you:
 - **Pushover alerts** to your phone when a job starts, pauses, resumes, finishes or stops, and when LightBurn becomes unreachable or comes back. Alerts are sent by a background watcher, so they work even if nobody has the page open.
 - A **history** table on the status page: job started / paused / resumed / finished (with total job time), machine connected / disconnected, and LightBurn unreachable / reachable again, with timestamps. The last 500 events are kept across restarts.
 - Optionally, the **project filename** of the job (see [Showing the project filename](#showing-the-project-filename)).
-- A **configuration page** (`/lightburn/config`) where you enter your Pushover keys, verify them, and send a test alert.
+- A **settings page** (`/lightburn/config`) where you set the address of the LightBurn computer to monitor, enter your Pushover keys, verify them, and send a test alert.
 
 It is read-only: it can look at LightBurn's state but cannot start, stop or change anything.
 
@@ -121,13 +121,15 @@ cd LightBurn-Notifier
 
 ### 2. Tell it where LightBurn is
 
-Edit `lightburn-status.service` and set the address of the LightBurn computer:
+You can do this after installing, on the config page (`/lightburn/config`, field **LightBurn computer**), and change it at any time without restarting anything.
+
+To have the right address from the first start instead, edit `lightburn-status.service` and set the address of the LightBurn computer:
 
 ```ini
 Environment=LIGHTBURN_URL=http://192.168.1.50:19520
 ```
 
-Use the LightBurn computer's IP address (or hostname) and keep port `19520`.
+Use the LightBurn computer's IP address (or hostname) and keep port `19520`. An address saved on the config page takes priority over this setting.
 
 ### 3. Pair with LightBurn (one time)
 
@@ -233,7 +235,8 @@ LightBurn does not report whether a job completed or was cancelled, so "finished
 
 | Setting | Where | Default |
 |---|---|---|
-| LightBurn address | `Environment=LIGHTBURN_URL=` in `lightburn-status.service` | `http://127.0.0.1:19520` (the unit file sets an example address; change it) |
+| LightBurn address | **config page** (saved in `/etc/lightburn/host`), or `Environment=LIGHTBURN_URL=` in `lightburn-status.service` as the fallback | `http://127.0.0.1:19520` (the unit file sets an example address; change it) |
+| LightBurn address file | `LIGHTBURN_HOST_FILE` env var | `/etc/lightburn/host` |
 | Pairing secret file | `LIGHTBURN_SECRET_FILE` env var | `/etc/lightburn/secret` |
 | Pushover keys file | `LIGHTBURN_PUSHOVER_FILE` env var | `/etc/lightburn/pushover` |
 | History file | `LIGHTBURN_HISTORY_FILE` env var | `/var/lib/lightburn-status/history.jsonl` |
@@ -255,7 +258,8 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 | `GET /api/poll` | LightBurn `/api/events/poll` (job, position, overrides, aux, settings) |
 | `GET /api/project` | LightBurn `/api/project` (only works if paired with `project`) |
 | `GET /api/history` | newest 100 history events, newest first |
-| `GET /api/config` | `{"configured": true/false}` (never returns the keys) |
+| `GET /api/config` | Pushover configured or not, and the LightBurn host and port being monitored (never returns the keys) |
+| `POST /api/config/host` | set the LightBurn host (`{"host": "192.168.1.50"}` or `"host:port"`) |
 | `POST /api/config` | verify and save Pushover keys |
 | `POST /api/config/test` | send a test alert |
 
@@ -263,6 +267,7 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 
 ## Security notes
 
+- The LightBurn address set on the config page must be a **local network address** (private, loopback or link-local); public addresses are refused. This stops the page from being used to send the service's API tokens to a machine on the internet.
 - The service holds a **read-only** (`state`) LightBurn credential and cannot change anything in LightBurn.
 - The status page and the config page have **no login**. Anyone who can reach the server can see machine state and can **replace** the Pushover keys (they cannot read the existing ones). This is fine on a trusted home or workshop network; do not expose the server to the internet as-is.
 - To require a password on the config page, add basic auth in nginx:
