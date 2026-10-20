@@ -50,6 +50,15 @@
     <p class="hint">On the LightBurn computer run <code>pair.ps1</code> (add <code>-IncludeProject</code> to also show the project filename), click <b>Allow</b> in LightBurn within 30 seconds, then paste the secret it prints here. It is checked against LightBurn before saving, and never shown again.</p>
     <div id="smsg" role="status"></div>
   </div>
+  <h2>Camera view</h2>
+  <div class="card">
+    <label style="display:flex; gap:10px; align-items:center; margin-top:0; cursor:pointer">
+      <input id="cam" type="checkbox" style="width:auto; margin:0">
+      Show LightBurn's camera image on the status page
+    </label>
+    <p class="hint">Off by default. LightBurn provides the most recent camera capture (the same image as File &gt; Save Background Capture), not live video, so the picture updates when LightBurn captures a new one. While this is on, <b>anyone who can open the status page can see your workspace</b>. It needs a pairing with project access (<code>pair.ps1 -IncludeProject</code>) and a camera set up in LightBurn.</p>
+    <div id="cmsg" role="status"></div>
+  </div>
   <h2>Pushover alerts</h2>
   <div class="card">
     <p>Status: <span id="cur">checking…</span></p>
@@ -75,10 +84,18 @@ async function status() {
   try { const c = await (await fetch('api/config', {cache:'no-store'})).json();
         $('cur').textContent = c.configured ? 'Configured' : 'Not configured';
         $('cursec').textContent = c.secret_configured ? 'Saved' : 'Not set';
+        $('cam').checked = !!c.camera;
         $('curhost').textContent = c.host + ':' + c.port + ' (' + c.host_source + ')';
         if (!$('host').value) $('host').value = c.port === 19520 ? c.host : c.host + ':' + c.port; }
   catch { $('cur').textContent = $('curhost').textContent = $('cursec').textContent = 'Unknown'; }
 }
+$('cam').addEventListener('change', async () => {
+  const want = $('cam').checked;
+  const [ok, d] = await post('api/config/camera', {enabled: want});
+  $('cmsg').textContent = ok ? (want ? 'Camera view enabled.' : 'Camera view disabled.') : (d.error || 'Save failed');
+  $('cmsg').className = ok ? 'ok' : 'bad';
+  if (!ok) $('cam').checked = !want;
+});
 function ssay(text, cls) { $('smsg').textContent = text; $('smsg').className = cls; }
 $('sf').addEventListener('submit', async e => {
   e.preventDefault(); ssay('Checking with LightBurn…', 'ok');

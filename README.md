@@ -1,13 +1,13 @@
 # LightBurn Notifier
 
-**Version 1.4.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.5.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
 - A **status page** (`/lightburn/`) showing whether LightBurn is reachable, the selected machine, whether the machine is connected, the job state (idle / running / paused), job progress, machine and workpiece position, the speed and power overrides, spindle / coolant / vacuum state, jog settings, and your saved positions. It refreshes every second.
 - **Pushover alerts** to your phone when a job starts, pauses, resumes, finishes or stops, and when LightBurn becomes unreachable or comes back. Alerts are sent by a background watcher, so they work even if nobody has the page open.
 - A **history** table on the status page: job started / paused / resumed / finished (with total job time), machine connected / disconnected, and LightBurn unreachable / reachable again, with timestamps. The last 500 events are kept across restarts.
-- Optionally, the **project filename** of the job (see [Showing the project filename](#showing-the-project-filename)).
+- Optionally (needs a pairing with project access, see [Project card, filename and camera](#project-card-filename-and-camera)): a **project card** with the cut settings, the project filename in alerts, and a **camera view** that you can switch on or off in settings.
 - A **settings page** (`/lightburn/config`) where you set the address of the LightBurn computer to monitor, enter the pairing secret, enter your Pushover keys, verify them, and send a test alert.
 
 It is read-only: it can look at LightBurn's state but cannot start, stop or change anything.
@@ -71,15 +71,23 @@ sudo systemctl stop lightburn-status && sudo rm /var/lib/lightburn-status/histor
 
 LightBurn's REST API reports only the job state (`idle`, `running`, `paused`) and, on some controllers, a progress percentage. It does **not** report a job name, elapsed time, estimated time or remaining time. This project measures job durations itself from the state changes it sees.
 
-### Showing the project filename
+### Project card, filename and camera
 
-The one thing the API offers about *what* is being run is the loaded project's filename (`GET /api/project`). It needs the `project` capability, which is chosen at pairing time and cannot be changed afterwards, so pair again with:
+LightBurn's `project` capability (chosen at pairing time and not changeable afterwards) unlocks details about *what* is loaded. With it, the status page gets:
+
+- a **Project card**: filename (with an "unsaved changes" flag), number of shapes, machine and workpiece size, controller, and a table of the cut layers in use with their mode, speed, power, passes and shape count, in the order LightBurn will run them (disabled and tool layers are dimmed and not numbered);
+- the project filename in the status card, in the history, and in the Pushover alerts;
+- optionally, the **camera view** (see below).
+
+Pair again with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\pair.ps1 -IncludeProject
 ```
 
-and paste the new secret into the **Pairing secret** box on the config page (see step 4 below). The filename then appears on the status page, in the history, and in the Pushover message. Without that capability everything still works; the filename is simply left out. Note that it is the file *loaded* in LightBurn, which is normally the job being run but is not guaranteed to be. Also note that LightBurn's `project` capability additionally covers camera imagery and project details; this project only ever reads the filename.
+and paste the new secret into the **Pairing secret** box on the config page (see step 4 below). Without that capability everything else still works; the project card and filename are simply left out. Note that the project is the file *loaded* in LightBurn, which is normally the job being run but is not guaranteed to be.
+
+**Camera view.** If you have a camera set up in LightBurn, you can show its image on the status page by ticking **Show LightBurn's camera image** in the settings page. It is **off by default**, and while it is off the service never requests the image from LightBurn or serves it. LightBurn only provides the most recent capture (the same image as File > Save Background Capture), not live video; the page checks for a new image every few seconds and downloads it only when LightBurn's image revision changes. Because the status page has no login, anyone who can open it can see the camera image while this is enabled.
 
 ---
 
@@ -239,6 +247,7 @@ LightBurn does not report whether a job completed or was cancelled, so "finished
 | LightBurn address file | `LIGHTBURN_HOST_FILE` env var | `/etc/lightburn/host` |
 | Pairing secret file | `LIGHTBURN_SECRET_FILE` env var | `/etc/lightburn/secret` |
 | Pushover keys file | `LIGHTBURN_PUSHOVER_FILE` env var | `/etc/lightburn/pushover` |
+| Camera view switch | settings page (saved in `/etc/lightburn/camera`) or `LIGHTBURN_CAMERA_FILE` env var | off |
 | History file | `LIGHTBURN_HISTORY_FILE` env var | `/var/lib/lightburn-status/history.jsonl` |
 | Events kept | `HISTORY_MAX` in `lightburn_status.py` | 500 |
 | Check interval | `WATCH_INTERVAL` in `lightburn_status.py` | 1 second |
@@ -258,6 +267,10 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 | `GET /api/poll` | latest LightBurn `/api/events/poll` snapshot (job, position, overrides, aux, settings, connection), cached by the watcher |
 | `GET /api/goto/saved` | LightBurn saved positions |
 | `GET /api/project` | LightBurn `/api/project` (only works if paired with `project`) |
+| `GET /api/project/summary` | compact project, layer and cut-settings summary used by the project card |
+| `GET /api/camera/meta` | `{"enabled": false}` unless the camera view is on; otherwise image metadata |
+| `GET /api/camera/image` | the camera PNG (404 unless the camera view is on and LightBurn has an image) |
+| `POST /api/config/camera` | turn the camera view on or off (`{"enabled": true}`) |
 | `GET /api/history` | newest 100 history events, newest first |
 | `GET /api/config` | Pushover configured or not, and the LightBurn host and port being monitored (never returns the keys) |
 | `POST /api/config/secret` | verify a pairing secret against LightBurn and save it (`{"secret": "..."}`) |
@@ -270,7 +283,7 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 ## Security notes
 
 - The LightBurn address set on the config page must be a **local network address** (private, loopback or link-local); public addresses are refused. This stops the page from being used to send the service's API tokens to a machine on the internet.
-- The service holds a **read-only** (`state`) LightBurn credential and cannot change anything in LightBurn.
+- The service only ever **reads** from LightBurn and cannot change anything in it. With the default pairing it holds a `state` credential; with `pair.ps1 -IncludeProject` it also holds `project`, which in LightBurn additionally covers camera imagery. The service reads the camera only if you switch the camera view on.
 - The status page and the config page have **no login**. Anyone who can reach the server can see machine state and can **replace** the Pushover keys, the pairing secret and the LightBurn address (they cannot read the existing keys or secret). This is fine on a trusted home or workshop network; do not expose the server to the internet as-is.
 - To require a password on the config page, add basic auth in nginx:
 

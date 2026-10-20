@@ -251,6 +251,114 @@ def project_filename():
     return data.get("filename") or None if code == 200 else None
 
 
+CAMERA_FILE = os.environ.get("LIGHTBURN_CAMERA_FILE", "/etc/lightburn/camera")
+CAMERA_MAX_AGE = 3    # seconds between checks of LightBurn's camera image revision
+_cam = {"t": 0, "code": 0, "meta": {}, "rev": None, "png": None}
+_cam_lock = threading.Lock()
+
+
+def camera_enabled():
+    """The camera view is OFF unless explicitly enabled on the config page."""
+    try:
+        return open(CAMERA_FILE).read().strip() == "1"
+    except OSError:
+        return False
+
+
+def save_camera(on):
+    tmp = CAMERA_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("1\n" if on else "0\n")
+    os.replace(tmp, CAMERA_FILE)
+    with _cam_lock:
+        _cam.update(t=0, rev=None, png=None)     # drop any cached image
+
+
+def fetch_png(path):
+    """(status, bytes) for a binary image response from LightBurn; never raises."""
+    try:
+        req = urllib.request.Request(lightburn_url() + path,
+                                     headers={"Authorization": "Bearer " + token()})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return 200, r.read(25_000_000)
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+    except Exception:
+        return 502, b""
+
+
+def camera_state():
+    """(code, metadata, png) of LightBurn's camera overlay, cached briefly.
+
+    The image is re-downloaded only when LightBurn's overlay `revision` changes.
+    code 200 = image available, 404 = LightBurn has no overlay loaded, else an error.
+    """
+    with _cam_lock:
+        if time.time() - _cam["t"] > CAMERA_MAX_AGE:
+            code, meta = fetch("/api/overlay/metadata")
+            if code == 502 and "HTTP 404" in meta.get("error", ""):
+                code, meta = 404, {}
+            elif code == 200 and meta.get("revision") != _cam["rev"]:
+                pcode, png = fetch_png("/api/overlay")
+                if pcode == 200:
+                    _cam.update(rev=meta.get("revision"), png=png)
+                else:
+                    code, meta = pcode, {"error": f"image request failed (HTTP {pcode})"}
+            if code != 200:
+                _cam.update(rev=None, png=None)
+            _cam.update(t=time.time(), code=code, meta=meta)
+        return _cam["code"], dict(_cam["meta"]), _cam["png"]
+
+
+_summary = {"t": 0, "code": 0, "data": {}}
+SUMMARY_MAX_AGE = 5   # seconds; /api/cuts is large, so it is fetched at most this often
+
+
+def _cut_row(c, layer_colors):
+    p = c.get("params") or {}
+    row = {"index": c.get("index"), "name": c.get("name") or "", "kind": c.get("kind"),
+           "mode": c.get("mode") or c.get("kind"), "enabled": c.get("enabled", True),
+           "priority": c.get("priority", 0), "shape_count": c.get("shape_count", 0),
+           "color": layer_colors.get(c.get("layer_index")),
+           "speed": p.get("speed"), "min_power": p.get("min_power"), "max_power": p.get("max_power"),
+           "passes": p.get("num_passes"), "interval": p.get("interval"), "dpi": p.get("dpi"),
+           "z_offset": p.get("z_offset")}
+    subs = []
+    for s in c.get("sub_layers") or []:
+        sp = s.get("params") or {}
+        subs.append({"name": s.get("name") or "", "mode": s.get("mode"), "enabled": s.get("enabled", True),
+                     "speed": sp.get("speed"), "min_power": sp.get("min_power"),
+                     "max_power": sp.get("max_power"), "passes": sp.get("num_passes")})
+    if subs:
+        row["sub_layers"] = subs
+    return row
+
+
+def project_summary():
+    """Compact project + cut-settings summary for the page (needs the 'project' capability)."""
+    if time.time() - _summary["t"] <= SUMMARY_MAX_AGE:
+        return _summary["code"], dict(_summary["data"])
+    code, proj = fetch("/api/project")
+    if code != 200:
+        result = (code, proj)
+    else:
+        out = {k: proj.get(k) for k in ("filename", "modified", "shape_count", "units", "workspace")}
+        laser = (proj.get("device") or {}).get("laser") or {}
+        out["device"] = {"name": (proj.get("device") or {}).get("name"),
+                         "controller": laser.get("controller"), "sources": laser.get("sources")}
+        lcode, ldata = fetch("/api/layers")
+        colors = {l.get("index"): l.get("color") for l in ldata.get("layers", [])} if lcode == 200 else {}
+        ccode, cdata = fetch("/api/cuts")
+        if ccode == 200 and cdata.get("product") == "lightburn":
+            rows = [_cut_row(c, colors) for c in cdata.get("cuts", []) if c.get("in_use")]
+            rows.sort(key=lambda r: (r["priority"], r["index"]))
+            out["cuts"] = rows
+            out["unused_cuts"] = sum(1 for c in cdata.get("cuts", []) if not c.get("in_use"))
+        result = (200, out)
+    _summary.update(t=time.time(), code=result[0], data=result[1])
+    return result[0], dict(result[1])
+
+
 snapshot = {"t": 0, "code": 0, "data": {}}   # latest /api/events/poll result
 
 
@@ -339,11 +447,11 @@ def watch():
 # ---- HTTP -------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, cache="no-store"):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -352,7 +460,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
-        if path == "/api/poll":
+        if path == "/api/camera/meta":
+            if not camera_enabled():
+                return self._json(200, {"enabled": False})
+            code, meta, _ = camera_state()
+            out = {"enabled": True, "available": code == 200}
+            if code == 200:
+                out.update(meta)
+            elif code != 404:
+                out["error"] = meta.get("error", "LightBurn did not answer")
+            self._json(200, out)
+        elif path == "/api/camera/image":
+            png = camera_state()[2] if camera_enabled() else None
+            if png:     # the URL carries the revision, so a given URL never changes
+                self._send(200, png, "image/png", cache="private, max-age=86400")
+            else:
+                self._send(404, b"no camera image", "text/plain")
+        elif path == "/api/project/summary":
+            code, data = project_summary()
+            self._json(code, data)
+        elif path == "/api/poll":
             code, data = live_snapshot()
             data["checked_at"] = int(time.time())
             self._json(code, data)
@@ -371,6 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                 host, port = urllib.parse.urlparse(LIGHTBURN).netloc.rsplit(":", 1)
             self._json(200, {"configured": load_pushover() is not None,
                              "secret_configured": secret_saved(),
+                             "camera": camera_enabled(),
                              "host": host, "port": int(port),
                              "host_source": "config page" if saved else "service default"})
         elif path in PAGES:
@@ -409,6 +537,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"error": f"could not save: {e}"})
             self._json(200, {"ok": True, "host": host, "port": port,
                              "reachable": host_reachable(host, port)})
+        elif path == "/api/config/camera":
+            on = body.get("enabled") is True
+            try:
+                save_camera(on)
+            except OSError as e:
+                return self._json(500, {"error": f"could not save: {e}"})
+            self._json(200, {"ok": True, "camera": on})
         elif path == "/api/config/secret":
             secret = str(body.get("secret", "")).strip()
             if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{8,128}", secret):
