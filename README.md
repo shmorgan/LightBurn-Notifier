@@ -1,6 +1,6 @@
 # LightBurn Notifier
 
-**Version 1.3.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.4.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
@@ -8,7 +8,7 @@ It gives you:
 - **Pushover alerts** to your phone when a job starts, pauses, resumes, finishes or stops, and when LightBurn becomes unreachable or comes back. Alerts are sent by a background watcher, so they work even if nobody has the page open.
 - A **history** table on the status page: job started / paused / resumed / finished (with total job time), machine connected / disconnected, and LightBurn unreachable / reachable again, with timestamps. The last 500 events are kept across restarts.
 - Optionally, the **project filename** of the job (see [Showing the project filename](#showing-the-project-filename)).
-- A **settings page** (`/lightburn/config`) where you set the address of the LightBurn computer to monitor, enter your Pushover keys, verify them, and send a test alert.
+- A **settings page** (`/lightburn/config`) where you set the address of the LightBurn computer to monitor, enter the pairing secret, enter your Pushover keys, verify them, and send a test alert.
 
 It is read-only: it can look at LightBurn's state but cannot start, stop or change anything.
 
@@ -79,7 +79,7 @@ The one thing the API offers about *what* is being run is the loaded project's f
 powershell -ExecutionPolicy Bypass -File .\pair.ps1 -IncludeProject
 ```
 
-and save the new secret (step 4 below). The filename then appears on the status page, in the history, and in the Pushover message. Without that capability everything still works; the filename is simply left out. Note that it is the file *loaded* in LightBurn, which is normally the job being run but is not guaranteed to be. Also note that LightBurn's `project` capability additionally covers camera imagery and project details; this project only ever reads the filename.
+and paste the new secret into the **Pairing secret** box on the config page (see step 4 below). The filename then appears on the status page, in the history, and in the Pushover message. Without that capability everything still works; the filename is simply left out. Note that it is the file *loaded* in LightBurn, which is normally the job being run but is not guaranteed to be. Also note that LightBurn's `project` capability additionally covers camera imagery and project details; this project only ever reads the filename.
 
 ---
 
@@ -162,7 +162,7 @@ This script:
 - installs and starts the `lightburn-status` systemd service
 - installs the nginx snippet at `/etc/nginx/snippets/lightburn.conf`
 
-Without the argument it installs everything but you must write the secret yourself:
+Without the argument it installs everything and you set the secret afterwards. The easiest way is the config page: open `/lightburn/config`, paste the secret into **Pairing secret**, and click **Verify & save**. It is checked against LightBurn before saving, and the page tells you whether the pairing includes project access. (If the config page is not reachable yet, write it by hand instead:)
 
 ```bash
 sudo sh -c 'printf %s "PASTE_SECRET_HERE" > /etc/lightburn/secret && chown www-data /etc/lightburn/secret && chmod 600 /etc/lightburn/secret'
@@ -260,6 +260,7 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 | `GET /api/project` | LightBurn `/api/project` (only works if paired with `project`) |
 | `GET /api/history` | newest 100 history events, newest first |
 | `GET /api/config` | Pushover configured or not, and the LightBurn host and port being monitored (never returns the keys) |
+| `POST /api/config/secret` | verify a pairing secret against LightBurn and save it (`{"secret": "..."}`) |
 | `POST /api/config/host` | set the LightBurn host (`{"host": "192.168.1.50"}` or `"host:port"`) |
 | `POST /api/config` | verify and save Pushover keys |
 | `POST /api/config/test` | send a test alert |
@@ -270,7 +271,7 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 
 - The LightBurn address set on the config page must be a **local network address** (private, loopback or link-local); public addresses are refused. This stops the page from being used to send the service's API tokens to a machine on the internet.
 - The service holds a **read-only** (`state`) LightBurn credential and cannot change anything in LightBurn.
-- The status page and the config page have **no login**. Anyone who can reach the server can see machine state and can **replace** the Pushover keys (they cannot read the existing ones). This is fine on a trusted home or workshop network; do not expose the server to the internet as-is.
+- The status page and the config page have **no login**. Anyone who can reach the server can see machine state and can **replace** the Pushover keys, the pairing secret and the LightBurn address (they cannot read the existing keys or secret). This is fine on a trusted home or workshop network; do not expose the server to the internet as-is.
 - To require a password on the config page, add basic auth in nginx:
 
   ```bash
@@ -325,7 +326,7 @@ systemctl status lightburn-status
 
 **Update** - pull the new code and run `sudo ./install.sh` again (no argument, so the existing secret is kept). Re-check `LIGHTBURN_URL` in the service file first, because the installer overwrites the unit file.
 
-**Re-pair** - run `pair.ps1` again and save the new secret as in step 4. Each pairing creates a new secret and a new consent prompt, so always save the newest one.
+**Re-pair** - run `pair.ps1` again and paste the new secret into the **Pairing secret** box on the config page. Each pairing creates a new secret and a new consent prompt, so always save the newest one.
 
 **Uninstall**
 

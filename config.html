@@ -39,6 +39,17 @@
     <p class="hint">Changes take effect immediately. Only local network addresses are accepted. If this is a different computer than before, run <code>pair.ps1</code> on it and save the new secret (see the README), because the pairing secret belongs to one LightBurn installation.</p>
     <div id="hmsg" role="status"></div>
   </div>
+  <h2>Pairing secret</h2>
+  <div class="card">
+    <p>Status: <span id="cursec">checking…</span></p>
+    <form id="sf" autocomplete="off">
+      <label for="secret">Secret from <code>pair.ps1</code></label>
+      <input id="secret" type="password" required autocomplete="off" spellcheck="false">
+      <div class="row"><button type="submit">Verify &amp; save</button></div>
+    </form>
+    <p class="hint">On the LightBurn computer run <code>pair.ps1</code> (add <code>-IncludeProject</code> to also show the project filename), click <b>Allow</b> in LightBurn within 30 seconds, then paste the secret it prints here. It is checked against LightBurn before saving, and never shown again.</p>
+    <div id="smsg" role="status"></div>
+  </div>
   <h2>Pushover alerts</h2>
   <div class="card">
     <p>Status: <span id="cur">checking…</span></p>
@@ -63,10 +74,23 @@ function say(text, ok) { $('msg').textContent = text; $('msg').className = ok ? 
 async function status() {
   try { const c = await (await fetch('api/config', {cache:'no-store'})).json();
         $('cur').textContent = c.configured ? 'Configured' : 'Not configured';
+        $('cursec').textContent = c.secret_configured ? 'Saved' : 'Not set';
         $('curhost').textContent = c.host + ':' + c.port + ' (' + c.host_source + ')';
         if (!$('host').value) $('host').value = c.port === 19520 ? c.host : c.host + ':' + c.port; }
-  catch { $('cur').textContent = $('curhost').textContent = 'Unknown'; }
+  catch { $('cur').textContent = $('curhost').textContent = $('cursec').textContent = 'Unknown'; }
 }
+function ssay(text, cls) { $('smsg').textContent = text; $('smsg').className = cls; }
+$('sf').addEventListener('submit', async e => {
+  e.preventDefault(); ssay('Checking with LightBurn…', 'ok');
+  const [ok, d] = await post('api/config/secret', {secret: $('secret').value});
+  if (!ok) ssay(d.error || 'Save failed', 'bad');
+  else if (!d.verified) ssay('Saved, but LightBurn could not be reached to verify it (' + (d.note || 'no answer') + ').', 'bad');
+  else ssay('Saved and verified. ' + (d.project
+      ? 'Project access: yes, so the project filename will be shown.'
+      : 'Project access: no. Pair again with -IncludeProject to show the project filename.'), 'ok');
+  if (ok) $('secret').value = '';
+  status();
+});
 function hsay(text, cls) { $('hmsg').textContent = text; $('hmsg').className = cls; }
 $('hf').addEventListener('submit', async e => {
   e.preventDefault(); hsay('Saving…', 'ok');

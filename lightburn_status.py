@@ -39,9 +39,10 @@ SNAPSHOT_MAX_AGE = 3 # seconds a cached snapshot may be served to the page
 PUSHOVER = "https://api.pushover.net/1/"
 
 
-def token():
-    with open(SECRET_FILE) as f:
-        secret = f.read().strip()
+def token(secret=None):
+    if secret is None:
+        with open(SECRET_FILE) as f:
+            secret = f.read().strip()
     minute = str(int(time.time()) // 60)
     return hmac.new(secret.encode(), minute.encode(), hashlib.sha256).hexdigest()
 
@@ -95,6 +96,23 @@ def save_host(host, port):
     config_gen += 1
 
 
+def save_secret(secret):
+    global config_gen
+    tmp = SECRET_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(secret)
+    os.replace(tmp, SECRET_FILE)
+    config_gen += 1
+
+
+def secret_saved():
+    try:
+        return bool(open(SECRET_FILE).read().strip())
+    except OSError:
+        return False
+
+
 def host_reachable(host, port):
     try:
         urllib.request.urlopen(f"http://{host}:{port}/", timeout=4).read(1)
@@ -105,11 +123,15 @@ def host_reachable(host, port):
         return False
 
 
-def fetch(path):
-    """Return (http_status, dict) from LightBurn; never raises."""
+def fetch(path, secret=None):
+    """Return (http_status, dict) from LightBurn; never raises.
+
+    Uses the saved pairing secret unless one is given (to test a candidate secret).
+    HTTP 502 = unreachable or rejected (the dict says which), 500 = no secret saved.
+    """
     try:
         req = urllib.request.Request(lightburn_url() + path,
-                                     headers={"Authorization": "Bearer " + token()})
+                                     headers={"Authorization": "Bearer " + token(secret)})
         with urllib.request.urlopen(req, timeout=5) as r:
             return 200, json.loads(r.read())
     except urllib.error.HTTPError as e:
@@ -348,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 host, port = urllib.parse.urlparse(LIGHTBURN).netloc.rsplit(":", 1)
             self._json(200, {"configured": load_pushover() is not None,
+                             "secret_configured": secret_saved(),
                              "host": host, "port": int(port),
                              "host_source": "config page" if saved else "service default"})
         elif path in PAGES:
@@ -386,6 +409,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"error": f"could not save: {e}"})
             self._json(200, {"ok": True, "host": host, "port": port,
                              "reachable": host_reachable(host, port)})
+        elif path == "/api/config/secret":
+            secret = str(body.get("secret", "")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{8,128}", secret):
+                return self._json(400, {"error": "That does not look like a pairing secret "
+                                                 "(8-128 letters, numbers or - _ . characters, no spaces)."})
+            code, data = fetch("/api/status", secret)
+            if code == 502 and "401" in data.get("error", ""):
+                return self._json(400, {"error": "LightBurn rejected this secret. Check that you copied "
+                                                 "the newest one, and that both computers' clocks are correct."})
+            verified = code == 200
+            try:
+                save_secret(secret)
+            except OSError as e:
+                return self._json(500, {"error": f"could not save: {e}"})
+            project = verified and fetch("/api/project", secret)[0] == 200
+            self._json(200, {"ok": True, "verified": verified, "project": project,
+                             "note": "" if verified else data.get("error", "")})
         elif path == "/api/config/test":
             ok, err = pushover("LightBurn test", "Pushover alerts are working.")
             self._json(200 if ok else 400, {"ok": ok, "error": err})
