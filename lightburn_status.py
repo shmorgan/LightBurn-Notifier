@@ -4,11 +4,25 @@
 Serves the status page and /api/status, signing requests with the paired secret.
 Also watches the job state and sends Pushover alerts.
 Listens on 127.0.0.1:8095; nginx exposes it at /lightburn/.
+
+Copyright (C) 2026 Stephen Morgan
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import hashlib, hmac, json, os, threading, time, urllib.parse, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-LIGHTBURN = os.environ.get("LIGHTBURN_URL", "http://10.255.201.243:19520")
+LIGHTBURN = os.environ.get("LIGHTBURN_URL", "http://127.0.0.1:19520")
 SECRET_FILE = os.environ.get("LIGHTBURN_SECRET_FILE", "/etc/lightburn/secret")
 PUSHOVER_FILE = os.environ.get("LIGHTBURN_PUSHOVER_FILE", "/etc/lightburn/pushover")
 HERE = os.path.dirname(os.path.abspath(__file__))

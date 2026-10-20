@@ -1,6 +1,6 @@
 # LightBurn Notifier
 
-**Version 1.1** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.1.1** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
@@ -233,7 +233,7 @@ LightBurn does not report whether a job completed or was cancelled, so "finished
 
 | Setting | Where | Default |
 |---|---|---|
-| LightBurn address | `Environment=LIGHTBURN_URL=` in `lightburn-status.service` | `http://10.255.201.243:19520` |
+| LightBurn address | `Environment=LIGHTBURN_URL=` in `lightburn-status.service` | `http://127.0.0.1:19520` (the unit file sets an example address; change it) |
 | Pairing secret file | `LIGHTBURN_SECRET_FILE` env var | `/etc/lightburn/secret` |
 | Pushover keys file | `LIGHTBURN_PUSHOVER_FILE` env var | `/etc/lightburn/pushover` |
 | History file | `LIGHTBURN_HISTORY_FILE` env var | `/var/lib/lightburn-status/history.jsonl` |
@@ -348,3 +348,13 @@ sudo systemctl daemon-reload && sudo nginx -t && sudo systemctl reload nginx
 | `VERSION` | Current version |
 
 LightBurn API documentation: <https://github.com/LightBurnSoftware/LightBurn-REST>
+
+---
+
+## License
+
+Copyright (C) 2026 Stephen Morgan
+
+LightBurn Notifier is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License, version 3 or (at your option) any later version**, as published by the Free Software Foundation. It is distributed in the hope that it will be useful, but **without any warranty**; without even the implied warranty of merchantability or fitness for a particular purpose. See the [LICENSE](LICENSE) file for the full text.
+
+This project is not affiliated with or endorsed by LightBurn Software. "LightBurn" and its logo are trademarks of their respective owner; the logo in `assets/` is included only as an icon for use with your own notifications.
