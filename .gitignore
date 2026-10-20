@@ -1,0 +1,6 @@
+# secrets never belong in the repo
+secret
+pushover
+*.key
+__pycache__/
+*.pyc

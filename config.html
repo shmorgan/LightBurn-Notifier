@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LightBurn Alerts</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#6b7385; --ok:#1a8f4c; --bad:#c9342b; --line:#e3e6ec; --accent:#2f6fed; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171e; --card:#1d222c; --fg:#e8ebf2; --muted:#9097a8; --ok:#3ccf7e; --bad:#ff6b61; --line:#2c3340; --accent:#6c9bff; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:1.4rem; margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  label { display:block; font-weight:600; margin-top:14px; }
+  input { width:100%; box-sizing:border-box; padding:10px; margin-top:4px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); font:inherit; }
+  .row { display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; }
+  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.alt { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .hint, footer a { color:var(--muted); font-size:.9rem; }
+  #msg { margin-top:14px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  #cur { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pushover Alerts</h1>
+  <div class="card">
+    <p>Status: <span id="cur">checking…</span></p>
+    <p class="hint">Alerts are sent when the job state changes (started, paused, resumed, finished) and when LightBurn becomes unreachable or comes back. Saved keys are never shown again; enter new ones to replace them.</p>
+    <form id="f" autocomplete="off">
+      <label for="app">Application API token</label>
+      <input id="app" type="password" required autocomplete="off">
+      <label for="user">User key</label>
+      <input id="user" type="password" required autocomplete="off">
+      <div class="row">
+        <button type="submit">Verify &amp; save</button>
+        <button type="button" class="alt" id="test">Send test alert</button>
+      </div>
+    </form>
+    <div id="msg" role="status"></div>
+  </div>
+  <p><a class="hint" href="./">← Back to status</a></p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+function say(text, ok) { $('msg').textContent = text; $('msg').className = ok ? 'ok' : 'bad'; }
+async function status() {
+  try { const c = await (await fetch('api/config', {cache:'no-store'})).json();
+        $('cur').textContent = c.configured ? 'Configured' : 'Not configured'; }
+  catch { $('cur').textContent = 'Unknown'; }
+}
+async function post(path, body) {
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {})});
+  return [r.ok, await r.json().catch(() => ({}))];
+}
+$('f').addEventListener('submit', async e => {
+  e.preventDefault(); say('Checking with Pushover…', true);
+  const [ok, d] = await post('api/config', {app_token:$('app').value, user_key:$('user').value});
+  if (ok) { say('Saved. Use "Send test alert" to confirm.', true); $('app').value = $('user').value = ''; }
+  else say(d.error || 'Save failed', false);
+  status();
+});
+$('test').addEventListener('click', async () => {
+  say('Sending…', true);
+  const [ok, d] = await post('api/config/test');
+  say(ok ? 'Test alert sent.' : 'Failed: ' + (d.error || 'unknown error'), ok);
+});
+status();
+</script>
+</body>
+</html>

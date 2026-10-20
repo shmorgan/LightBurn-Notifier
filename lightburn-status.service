@@ -1,0 +1,9 @@
+[Unit]
+Description=LightBurn status proxy
+After=network.target
+[Service]
+User=www-data
+ExecStart=/usr/bin/python3 /opt/lightburn-status/lightburn_status.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
