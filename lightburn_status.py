@@ -13,7 +13,10 @@ SECRET_FILE = os.environ.get("LIGHTBURN_SECRET_FILE", "/etc/lightburn/secret")
 PUSHOVER_FILE = os.environ.get("LIGHTBURN_PUSHOVER_FILE", "/etc/lightburn/pushover")
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAGES = {"/": "index.html", "/config": "config.html"}
-ENDPOINTS = {"/api/status": "/api/status", "/api/poll": "/api/events/poll"}
+HISTORY_FILE = os.environ.get("LIGHTBURN_HISTORY_FILE", "/var/lib/lightburn-status/history.jsonl")
+HISTORY_MAX = 500    # events kept
+ENDPOINTS = {"/api/status": "/api/status", "/api/poll": "/api/events/poll",
+             "/api/project": "/api/project"}
 WATCH_INTERVAL = 2   # seconds between checks
 DOWN_AFTER = 3       # consecutive failed checks before "unreachable" alert
 PUSHOVER = "https://api.pushover.net/1/"
@@ -87,6 +90,47 @@ def save_pushover(app_token, user_key):
     os.replace(tmp, PUSHOVER_FILE)
 
 
+# ---- History ----------------------------------------------------------------
+
+history = []                 # oldest first, capped at HISTORY_MAX
+history_lock = threading.Lock()
+_since_trim = 0
+
+
+def load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            for line in f.readlines()[-HISTORY_MAX:]:
+                try:
+                    history.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+
+
+def record(event):
+    """Add an event to the history (memory + file). Never raises."""
+    global _since_trim
+    event.setdefault("t", time.time())
+    event["t"] = int(event["t"])
+    with history_lock:
+        history.append(event)
+        del history[:-HISTORY_MAX]
+        try:
+            os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+            _since_trim += 1
+            if _since_trim >= HISTORY_MAX:       # keep the file from growing forever
+                _since_trim = 0
+                with open(HISTORY_FILE, "w") as f:
+                    f.writelines(json.dumps(e) + "\n" for e in history)
+            else:
+                with open(HISTORY_FILE, "a") as f:
+                    f.write(json.dumps(event) + "\n")
+        except OSError as e:
+            print("history write failed:", e, flush=True)
+
+
 # ---- Watcher ----------------------------------------------------------------
 
 def describe(old, new):
@@ -96,37 +140,84 @@ def describe(old, new):
             "paused": "Job paused"}.get(new, f"Job {new}")
 
 
+def duration(sec):
+    sec = int(sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s" if m else f"{s}s"
+
+
+def project_filename():
+    """Loaded project's filename, or None (needs the 'project' capability)."""
+    code, data = fetch("/api/project")
+    return data.get("filename") or None if code == 200 else None
+
+
 def watch():
-    """Background loop: alert on job-state changes and on LightBurn going unreachable."""
-    last = None      # last confirmed job state (None = needs a fresh baseline)
-    pending = None   # candidate state, must be seen twice in a row
-    fails = 0
+    """Background loop: record history, alert on job-state changes and on outages."""
+    last = None        # last confirmed job state (None = needs a fresh baseline)
+    pending = None     # candidate state, must be seen twice in a row
+    pending_since = 0
+    fails, fail_since = 0, 0
     down = False
+    machine = None     # last seen "machine connected" flag
+    job_start = job_file = None
     while True:
+        now = time.time()
         code, data = fetch("/api/events/poll")
         if code == 200:
             if down:
-                pushover("LightBurn: reachable again", "LightBurn is responding again.")
-                down, last, pending = False, None, None   # rebaseline after an outage
+                record({"type": "outage", "to": "reachable", "t": now,
+                        "down_for": int(now - fail_since)})
+                pushover("LightBurn: reachable again",
+                         f"LightBurn is responding again after {duration(now - fail_since)}.")
+                down, last, pending, machine = False, None, None, None   # rebaseline
             fails = 0
             state = data.get("job", {}).get("state")
-            device = data.get("connection", {}).get("device_name", "LightBurn")
+            conn = data.get("connection", {})
+            device = conn.get("device_name", "LightBurn")
+            connected = conn.get("connected")
+            if machine is not None and connected is not None and connected != machine:
+                record({"type": "machine", "t": now, "device": device,
+                        "to": "connected" if connected else "disconnected"})
+            if connected is not None:
+                machine = connected
             if state and last is None:
                 last = state
+                if state != "idle":
+                    job_file = project_filename()
             elif state and state != last:
                 if pending == state:
-                    pushover("LightBurn: " + describe(last, state),
-                             f"{device}: {last} -> {state}")
+                    ev = {"type": "job", "t": pending_since, "from": last, "to": state}
+                    if state == "running" and last == "idle":
+                        job_start, job_file = pending_since, project_filename()
+                    if job_file:
+                        ev["file"] = job_file
+                    if state == "idle" and job_start:
+                        ev["total"] = int(pending_since - job_start)
+                    record(ev)
+                    lines = [f"{device}: {last} -> {state}"]
+                    if job_file:
+                        lines.append("File: " + job_file)
+                    if "total" in ev:
+                        lines.append("Total time: " + duration(ev["total"]))
+                    pushover("LightBurn: " + describe(last, state), "\n".join(lines))
+                    if state == "idle":
+                        job_start = job_file = None
                     last, pending = state, None
                 else:
-                    pending = state
+                    pending, pending_since = state, now
             else:
                 pending = None
         elif code == 502:   # unreachable / rejected; 500 (no secret yet) is not an outage
+            if fails == 0:
+                fail_since = now
             fails += 1
             if fails >= DOWN_AFTER and not down:
                 down = True
-                pushover("LightBurn: UNREACHABLE", data.get("error", "No response"))
+                err = data.get("error", "No response")
+                record({"type": "outage", "to": "unreachable", "t": fail_since, "error": err})
+                pushover("LightBurn: UNREACHABLE", err)
         time.sleep(WATCH_INTERVAL)
 
 
@@ -150,6 +241,9 @@ class Handler(BaseHTTPRequestHandler):
             code, data = fetch(ENDPOINTS[path])
             data["checked_at"] = int(time.time())
             self._json(code, data)
+        elif path == "/api/history":
+            with history_lock:
+                self._json(200, {"events": history[::-1][:100]})
         elif path == "/api/config":      # never returns the stored keys
             self._json(200, {"configured": load_pushover() is not None})
         elif path in PAGES:
@@ -189,5 +283,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    load_history()
     threading.Thread(target=watch, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 8095), Handler).serve_forever()

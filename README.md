@@ -1,11 +1,13 @@
 # LightBurn Notifier
 
-**Version 1.0** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
+**Version 1.1** - a small self-hosted status page and [Pushover](https://pushover.net) alert service for [LightBurn](https://lightburnsoftware.com) (v2.2 and later, which includes a local REST API).
 
 It gives you:
 
 - A **status page** (`/lightburn/`) showing whether LightBurn is reachable, the selected machine, whether the machine is connected, the job state (idle / running / paused), job progress, and machine and workpiece position. It refreshes every 5 seconds.
 - **Pushover alerts** to your phone when a job starts, pauses, resumes, finishes or stops, and when LightBurn becomes unreachable or comes back. Alerts are sent by a background watcher, so they work even if nobody has the page open.
+- A **history** table on the status page: job started / paused / resumed / finished (with total job time), machine connected / disconnected, and LightBurn unreachable / reachable again, with timestamps. The last 500 events are kept across restarts.
+- Optionally, the **project filename** of the job (see [Showing the project filename](#showing-the-project-filename)).
 - A **configuration page** (`/lightburn/config`) where you enter your Pushover keys, verify them, and send a test alert.
 
 It is read-only: it can look at LightBurn's state but cannot start, stop or change anything.
@@ -54,6 +56,30 @@ LightBurn only allows pairing (`POST /api/connect`) **from the LightBurn compute
 - A job state change (for example `idle` to `running`) must be seen on **two consecutive checks** (about 2 to 4 seconds) before an alert is sent. This avoids alerts from a single odd reading.
 - If LightBurn fails **3 checks in a row** (unreachable, connection refused, token rejected), an "UNREACHABLE" alert is sent once. When it answers again, a "reachable again" alert is sent and the job state is re-baselined so you do not get a false "job started".
 - Having no secret file yet is not treated as an outage.
+
+### History
+
+Every confirmed change is appended to `/var/lib/lightburn-status/history.jsonl` (one JSON object per line; the folder is created by systemd and survives restarts and reboots). The file is trimmed to the last 500 events. The status page shows the newest 100. Job events record the time the new state was first seen, and job-finished events include the total time since the job started. If LightBurn was already running a job when the service started, that job's total time is not known.
+
+To clear the history, stop the service, delete the file, and start it again:
+
+```bash
+sudo systemctl stop lightburn-status && sudo rm /var/lib/lightburn-status/history.jsonl && sudo systemctl start lightburn-status
+```
+
+### What LightBurn does not tell us
+
+LightBurn's REST API reports only the job state (`idle`, `running`, `paused`) and, on some controllers, a progress percentage. It does **not** report a job name, elapsed time, estimated time or remaining time. This project measures job durations itself from the state changes it sees.
+
+### Showing the project filename
+
+The one thing the API offers about *what* is being run is the loaded project's filename (`GET /api/project`). It needs the `project` capability, which is chosen at pairing time and cannot be changed afterwards, so pair again with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\pair.ps1 -IncludeProject
+```
+
+and save the new secret (step 4 below). The filename then appears on the status page, in the history, and in the Pushover message. Without that capability everything still works; the filename is simply left out. Note that it is the file *loaded* in LightBurn, which is normally the job being run but is not guaranteed to be. Also note that LightBurn's `project` capability additionally covers camera imagery and project details; this project only ever reads the filename.
 
 ---
 
@@ -195,7 +221,7 @@ sudo sh -c 'printf "APP_TOKEN=YOUR_APP_TOKEN\nUSER_KEY=YOUR_USER_KEY\n" > /etc/l
 | Job starts | `LightBurn: Job started` | state goes `idle` to `running` |
 | Job resumes | `LightBurn: Job resumed` | state goes `paused` to `running` |
 | Job pauses | `LightBurn: Job paused` | state goes to `paused` |
-| Job ends | `LightBurn: Job finished or stopped` | state goes from `running` or `paused` to `idle` |
+| Job ends | `LightBurn: Job finished or stopped` | state goes from `running` or `paused` to `idle` (message includes total time, and the filename if available) |
 | Outage | `LightBurn: UNREACHABLE` | 3 consecutive failed checks |
 | Recovery | `LightBurn: reachable again` | first success after an outage |
 
@@ -210,6 +236,8 @@ LightBurn does not report whether a job completed or was cancelled, so "finished
 | LightBurn address | `Environment=LIGHTBURN_URL=` in `lightburn-status.service` | `http://10.255.201.243:19520` |
 | Pairing secret file | `LIGHTBURN_SECRET_FILE` env var | `/etc/lightburn/secret` |
 | Pushover keys file | `LIGHTBURN_PUSHOVER_FILE` env var | `/etc/lightburn/pushover` |
+| History file | `LIGHTBURN_HISTORY_FILE` env var | `/var/lib/lightburn-status/history.jsonl` |
+| Events kept | `HISTORY_MAX` in `lightburn_status.py` | 500 |
 | Check interval | `WATCH_INTERVAL` in `lightburn_status.py` | 2 seconds |
 | Failed checks before outage alert | `DOWN_AFTER` in `lightburn_status.py` | 3 |
 | Listening address and port | last line of `lightburn_status.py` | `127.0.0.1:8095` |
@@ -225,6 +253,8 @@ After changing the service file or the Python script: `sudo systemctl daemon-rel
 | `GET /config` | Pushover configuration page |
 | `GET /api/status` | LightBurn `/api/status` (device name, connected, capabilities) |
 | `GET /api/poll` | LightBurn `/api/events/poll` (job, position, overrides, aux, settings) |
+| `GET /api/project` | LightBurn `/api/project` (only works if paired with `project`) |
+| `GET /api/history` | newest 100 history events, newest first |
 | `GET /api/config` | `{"configured": true/false}` (never returns the keys) |
 | `POST /api/config` | verify and save Pushover keys |
 | `POST /api/config/test` | send a test alert |
@@ -312,7 +342,7 @@ sudo systemctl daemon-reload && sudo nginx -t && sudo systemctl reload nginx
 | `config.html` | Pushover configuration page |
 | `lightburn-status.service` | systemd unit (set `LIGHTBURN_URL` here) |
 | `lightburn.conf` | nginx snippet |
-| `pair.ps1` | Pairing script, run on the LightBurn computer |
+| `pair.ps1` | Pairing script, run on the LightBurn computer (`-IncludeProject` to also allow reading the project filename) |
 | `install.sh` | Installer for the server |
 | `assets/lightburn-logo-128.png` | 128x128 icon to use for the Pushover application |
 | `VERSION` | Current version |

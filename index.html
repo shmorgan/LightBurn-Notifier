@@ -20,6 +20,14 @@
   dt { color:var(--muted); } dd { margin:0; }
   .bar { height:10px; background:var(--line); border-radius:5px; overflow:hidden; margin-bottom:4px; }
   #fill { height:100%; width:0; background:var(--ok); transition:width .4s; }
+  h2 { font-size:1.1rem; margin:28px 0 12px; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:8px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:last-child td { border-bottom:0; }
+  td.t { color:var(--muted); white-space:nowrap; padding-right:14px; font-size:.9rem; }
+  td.muted { color:var(--muted); }
+  td small { display:block; color:var(--muted); }
+  .ev-ok { color:var(--ok); } .ev-bad { color:var(--bad); } .ev-warn { color:var(--warn); }
   .err { color:var(--bad); margin-top:12px; }
   footer { color:var(--muted); font-size:.85rem; margin-top:12px; }
 </style>
@@ -38,13 +46,18 @@
       <dt>Machine</dt><dd id="dev">–</dd>
       <dt>Machine connected</dt><dd id="conn">–</dd>
       <dt>Job</dt><dd id="job">–</dd>
+      <dt id="filedt" hidden>Project file</dt><dd id="file" hidden></dd>
       <dt>Progress</dt><dd><div class="bar"><div id="fill"></div></div><span id="pct">–</span></dd>
       <dt>Machine position</dt><dd id="mpos">–</dd>
       <dt>Workpiece position</dt><dd id="wpos">–</dd>
       <dt>Z axis / overrides</dt><dd id="caps">–</dd>
     </dl>
   </div>
-  <footer>Last checked: <span id="when">never</span> · refreshes every 5 s ·<a href="config" style="color:inherit">Alert settings</a></footer>
+  <h2>History</h2>
+  <div class="card" style="padding:8px 20px">
+    <table id="hist"><tbody><tr><td class="muted">Loading…</td></tr></tbody></table>
+  </div>
+  <footer>Last checked: <span id="when">never</span> · refreshes every 5 s · <a href="config" style="color:inherit">Alert settings</a></footer>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -86,7 +99,46 @@ async function refresh() {
     $('when').textContent = new Date().toLocaleTimeString();
   }
 }
-refresh(); setInterval(refresh, 5000);
+const dur = s => { s = Math.round(s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60;
+  return h ? h + 'h ' + m + 'm ' + x + 's' : m ? m + 'm ' + x + 's' : x + 's'; };
+function describe(e) {   // -> [label, css class, detail]
+  const d = [];
+  if (e.type === 'job') {
+    if (e.file) d.push(e.file);
+    if (e.total != null) d.push('total time ' + dur(e.total));
+    if (e.to === 'running') return [e.from === 'paused' ? 'Job resumed' : 'Job started', 'ev-ok', d.join(' · ')];
+    if (e.to === 'paused') return ['Job paused', 'ev-warn', d.join(' · ')];
+    return ['Job finished or stopped', '', d.join(' · ')];
+  }
+  if (e.type === 'machine') return ['Machine ' + e.to, e.to === 'connected' ? 'ev-ok' : 'ev-warn', e.device || ''];
+  if (e.to === 'unreachable') return ['LightBurn unreachable', 'ev-bad', e.error || ''];
+  return ['LightBurn reachable again', 'ev-ok', e.down_for != null ? 'down for ' + dur(e.down_for) : ''];
+}
+async function history() {
+  try {
+    const ev = (await (await fetch('api/history', {cache:'no-store'})).json()).events || [];
+    const tb = document.createElement('tbody');
+    if (!ev.length) tb.innerHTML = '<tr><td class="muted">No changes recorded yet.</td></tr>';
+    for (const e of ev) {
+      const [label, cls, detail] = describe(e), tr = tb.insertRow();
+      tr.insertCell().textContent = new Date(e.t * 1000).toLocaleString();
+      tr.cells[0].className = 't';
+      const c = tr.insertCell(), b = document.createElement('b');
+      b.textContent = label; b.className = cls; c.appendChild(b);
+      if (detail) { const s = document.createElement('small'); s.textContent = detail; c.appendChild(s); }
+    }
+    $('hist').replaceChild(tb, $('hist').tBodies[0]);
+  } catch (e) { /* keep the previous table */ }
+}
+async function projectFile() {   // only available if paired with the 'project' capability
+  try {
+    const r = await fetch('api/project', {cache:'no-store'});
+    const f = r.ok ? (await r.json()).filename : null;
+    $('file').textContent = f || ''; $('file').hidden = $('filedt').hidden = !f;
+  } catch (e) { $('file').hidden = $('filedt').hidden = true; }
+}
+const tick = () => { refresh(); history(); projectFile(); };
+tick(); setInterval(tick, 5000);
 </script>
 </body>
 </html>

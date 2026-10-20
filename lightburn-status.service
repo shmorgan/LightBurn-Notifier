@@ -3,6 +3,8 @@ Description=LightBurn status proxy
 After=network.target
 [Service]
 User=www-data
+# Persistent folder for the event history (/var/lib/lightburn-status)
+StateDirectory=lightburn-status
 # Address of the LightBurn computer's REST API - change this to your own
 Environment=LIGHTBURN_URL=http://10.255.201.243:19520
 ExecStart=/usr/bin/python3 /opt/lightburn-status/lightburn_status.py
